@@ -211,6 +211,10 @@ def output_strs():
 @pytest.fixture
 def model_id():
     return "/work/afp6168/models/Qwen2.5-Math-1.5B"
+    return os.environ.get(
+        "ALIGNMENT_MODEL_ID",
+        "/data/a5-alignment/models/Qwen2.5-Math-1.5B",
+    )
 
 
 @pytest.fixture

@@ -286,6 +286,8 @@ The below adapters are used in the optional
 RLHF / safety part of the Alignment assignment.
 """
 
+######################temp##########################
+
 
 def get_packed_sft_dataset(
     tokenizer: PreTrainedTokenizerBase,
@@ -293,28 +295,72 @@ def get_packed_sft_dataset(
     seq_length: int,
     shuffle: bool,
 ) -> Dataset:
-    """
-    Given a tokenizer and a path to a dataset with instruction-tuning examples,
-    construct a PyTorch Dataset for language modeling. The examples should be
-    packed, i.e., all sequences in the dataset are of a constant length (`seq_length`).
+    import json
+    import random
 
-    Args:
-        tokenizer: transformers.PreTrainedTokenizerBase
-            Transformers tokenizer to use in tokenizing and encoding text.
-        dataset_path: str
-            Path to file with instruction-tuning examples.
-        seq_length: int
-            Number of tokens to include in each example.
-        shuffle: bool
-            If true, shuffle the documents before packing them into examples.
+    from torch.utils.data import Dataset
 
-    Returns:
-        PyTorch Dataset for language modeling. Each example in this dataset is a dictionary of
-        with keys "input_ids" and "labels" (both tensors of shape (seq_length, )).
-        "input_ids" contains the token IDs for the language modeling inputs, and "labels" contains
-        the token IDs for the language modeling labels.
-    """
-    raise NotImplementedError
+    if seq_length <= 0:
+        raise ValueError("seq_length must be positive")
+
+    with open(dataset_path, "r", encoding="utf-8") as f:
+        examples = [json.loads(line) for line in f if line.strip()]
+
+    if shuffle:
+        random.shuffle(examples)
+
+    all_input_ids = []
+    all_labels = []
+
+    for example in examples:
+        if "prompt" not in example or "response" not in example:
+            raise ValueError(
+                "Each SFT example must contain 'prompt' and 'response'"
+            )
+
+        text = example["prompt"] + example["response"]
+        token_ids = tokenizer(
+            text,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=seq_length + 1,
+        )["input_ids"]
+
+        # Need one extra token to construct shifted labels.
+        if len(token_ids) < seq_length + 1:
+            pad_id = tokenizer.pad_token_id
+            if pad_id is None:
+                pad_id = tokenizer.eos_token_id
+            if pad_id is None:
+                raise ValueError(
+                    "Tokenizer must define a pad_token_id or eos_token_id"
+                )
+            token_ids = token_ids + [pad_id] * (
+                seq_length + 1 - len(token_ids)
+            )
+
+        all_input_ids.append(
+            torch.tensor(token_ids[:-1], dtype=torch.long)
+        )
+        all_labels.append(
+            torch.tensor(token_ids[1:], dtype=torch.long)
+        )
+
+    class PackedSFTDataset(Dataset):
+        def __init__(self, input_ids, labels):
+            self.input_ids = input_ids
+            self.labels = labels
+
+        def __len__(self):
+            return len(self.input_ids)
+
+        def __getitem__(self, index):
+            return {
+                "input_ids": self.input_ids[index],
+                "labels": self.labels[index],
+            }
+
+    return PackedSFTDataset(all_input_ids, all_labels)
 
 
 def run_iterate_batches(
@@ -322,65 +368,78 @@ def run_iterate_batches(
     batch_size: int,
     shuffle: bool,
 ):
-    """
-    Given a PyTorch Dataset, return an iterable over batches of size `batch_size`.
-    Iterating through the returned iterable should constitute one epoch over the Dataset.
+    from torch.utils.data import DataLoader
 
-    Args:
-        dataset: Dataset
-            Dataset to emit batches from.
-        batch_size: int
-            Number of examples to include per batch.
-        shuffle: bool
-            If true, shuffle examples before batching them.
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
 
-    Returns:
-        Iterable over batches, where each batch has size `batch_size`.
-    """
-    raise NotImplementedError
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=False,
+    )
 
 
 def run_parse_mmlu_response(
     mmlu_example: dict[str, Any],
     model_output: str,
 ) -> str | None:
-    """
-    Given an MMLU example and a model output, parse the model output into a
-    predicted option letter (i.e., 'A', 'B', 'C', or 'D'). If the model output
-    cannot be parsed into a prediction option letter, return None.
+    import re
 
-    mmlu_example: dict[str, Any]
-        Dictionary with an MMLU example. Contains the following keys:
-        - "subject": str with the subject of the question.
-        - "question": str with the text of the question.
-        - "options": list[str] with the four answer options (in order).
-                     The first option refers to letter "A", the second to "B", etc.
-        - "answer": str with the option of the correct answer (e.g., "A")
-    model_output: str
-        str with the model's output to the MMLU example.
+    if not model_output:
+        return None
 
-    Returns:
-        str (one of "A", "B", "C", or "D") if the model output can be parsed into a prediction,
-        else None.
-    """
-    raise NotImplementedError
+    # Prefer an explicit answer label, e.g. "The answer is B."
+    patterns = [
+        r"(?i)\b(?:the\s+)?(?:correct\s+)?answer\s*(?:is|:)\s*\(?([ABCD])\)?\b",
+        r"(?i)\boption\s*\(?([ABCD])\)?\b",
+        r"(?i)\bfinal\s+answer\s*(?:is|:)\s*\(?([ABCD])\)?\b",
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, model_output)
+        if matches:
+            return matches[-1].upper()
+
+    # Accept a standalone final letter only when the output is short
+    # enough to plausibly be an answer rather than a long explanation.
+    cleaned = model_output.strip()
+    match = re.fullmatch(
+        r"(?is)(?:\(?([ABCD])\)?[.)]?)",
+        cleaned,
+    )
+    if match:
+        return match.group(1).upper()
+
+    return None
 
 
 def run_parse_gsm8k_response(
     model_output: str,
 ) -> str | None:
-    """
-    Given a GSM8K model output, parse the model output into a predicted numeric answer by
-    taking the last number that occurs in the output.
+    import re
 
-    model_output: str
-        str with the model's output to a GSM8K example.
+    if not model_output:
+        return None
 
-    Returns:
-        str with the predicted numeric answer if the model output can be parsed into a prediction,
-        else None.
-    """
-    raise NotImplementedError
+    # Prefer the final answer after the standard GSM8K delimiter.
+    answer_marker = re.findall(
+        r"(?im)####\s*(-?\d[\d,]*(?:\.\d+)?)",
+        model_output,
+    )
+    if answer_marker:
+        return answer_marker[-1].replace(",", "")
+
+    # Otherwise, use the last numeric value in the output.
+    numbers = re.findall(
+        r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?",
+        model_output,
+    )
+    if not numbers:
+        return None
+
+    return numbers[-1].replace(",", "")
 
 
 def run_compute_per_instance_dpo_loss(
@@ -392,27 +451,69 @@ def run_compute_per_instance_dpo_loss(
     response_chosen: str,
     response_rejected: str,
 ) -> torch.Tensor:
-    """
-    Given two language models (`lm`, and the "reference model" `lm_ref`),
-    their tokenizer, the DPO beta hyperparameter, a prompt and a pair
-    of responses to the prompt, computes the value of the DPO loss for this example.
+    import torch.nn.functional as F
 
-    lm: torch.nn.Module
-        Language model being trained.
-    lm_ref: torch.nn.Module
-        Reference language model.
-    tokenizer: PreTrainedTokenizerBase
-        Tokenizer for both language models.
-    beta: float
-        DPO beta hyperparameter.
-    prompt: str
-        Prompt for this instance of preference pair.
-    response_chosen: str
-        Preferred response to the prompt.
-    response_rejected: str
-        Rejected response to the prompt.
+    if beta <= 0:
+        raise ValueError("beta must be positive")
 
-    Returns:
-        torch.Tensor with the DPO loss for this example.
-    """
-    raise NotImplementedError
+    device = next(lm.parameters()).device
+    ref_device = next(lm_ref.parameters()).device
+
+    def response_log_prob_sum(
+        model: torch.nn.Module,
+        response: str,
+        model_device: torch.device,
+    ) -> torch.Tensor:
+        # Tokenize prompt and full sequence separately so that we can
+        # identify which next-token predictions belong to the response.
+        prompt_ids = tokenizer(
+            prompt,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )["input_ids"]
+
+        full_ids = tokenizer(
+            prompt + response,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )["input_ids"]
+
+        prompt_length = prompt_ids.shape[1]
+
+        if full_ids.shape[1] <= prompt_length:
+            raise ValueError("Response must contain at least one token")
+
+        input_ids = full_ids[:, :-1].to(model_device)
+        labels = full_ids[:, 1:].to(model_device)
+
+        logits = model(input_ids=input_ids).logits
+        log_probs = F.log_softmax(logits, dim=-1)
+
+        token_log_probs = log_probs.gather(
+            dim=-1,
+            index=labels.unsqueeze(-1),
+        ).squeeze(-1)
+
+        # The first response token is predicted at position prompt_length - 1.
+        response_start = max(prompt_length - 1, 0)
+        response_log_probs = token_log_probs[:, response_start:]
+
+        return response_log_probs.sum(dim=-1).squeeze(0)
+
+    policy_chosen = response_log_prob_sum(lm, response_chosen, device)
+    policy_rejected = response_log_prob_sum(lm, response_rejected, device)
+
+    with torch.no_grad():
+        ref_chosen = response_log_prob_sum(
+            lm_ref, response_chosen, ref_device
+        )
+        ref_rejected = response_log_prob_sum(
+            lm_ref, response_rejected, ref_device
+        )
+
+    # DPO: -log sigmoid(beta * (policy preference - reference preference))
+    policy_log_ratio = policy_chosen - policy_rejected
+    ref_log_ratio = ref_chosen.to(device) - ref_rejected.to(device)
+
+    loss = -F.logsigmoid(beta * (policy_log_ratio - ref_log_ratio))
+    return loss

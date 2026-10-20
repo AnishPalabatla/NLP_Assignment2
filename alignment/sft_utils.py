@@ -310,7 +310,7 @@ def log_generations(
     )
 
     sequences = gen_out.sequences  # (B, T_total)
-    prompt_lens = attention_mask.sum(dim=1).tolist()
+    #prompt_lens = attention_mask.sum(dim=1).tolist()
 
     samples: list[dict[str, Any]] = []
     lengths: list[int] = []
@@ -335,7 +335,7 @@ def log_generations(
         pl = int(prompt_lens[i])
 
         full_ids = sequences[i]
-        gen_ids = full_ids[pl:]  # generated part
+        gen_ids = full_ids[input_ids.shape[1]:]  # generated part
 
         response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
 
