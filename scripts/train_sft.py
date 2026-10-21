@@ -1,9 +1,10 @@
-
+from peft import LoraConfig, get_peft_model
 import json
 import os
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM, Adafactor
+from torch.optim import AdamW
 
 from alignment.sft_utils import (
     tokenize_prompt_and_output,
@@ -16,7 +17,7 @@ DATA_PATH = "data/sft.jsonl"
 OUTPUT_PATH = "checkpoints/sft-qwen-math"
 
 BATCH_SIZE = 1
-MAX_STEPS = 20
+MAX_STEPS = 1000
 MAX_PROMPT_TOKENS = 256
 MAX_RESPONSE_TOKENS = 384
 LEARNING_RATE = 1e-5
@@ -41,16 +42,26 @@ def main():
         torch_dtype=dtype,
     ).to(device)
 
-    model.config.use_cache = False
-    model.gradient_checkpointing_enable()
-    model.train()
+    lora_config = LoraConfig(
+    r=8,
+    lora_alpha=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
 
-    optimizer = Adafactor(
-        model.parameters(),
+    model.config.use_cache = False
+    model.train()
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+    optimizer = AdamW(
+        (p for p in model.parameters() if p.requires_grad),
         lr=LEARNING_RATE,
-        scale_parameter=False,
-        relative_step=False,
-        warmup_init=False,
+        foreach=False,
     )
 
     print("Loading SFT dataset...")
@@ -63,7 +74,7 @@ def main():
     print(f"Loaded {len(records)} examples")
 
     # Start with a small subset for the first training run.
-    records = records[:MAX_STEPS]
+    #records = records[:MAX_STEPS]
 
     dataloader = DataLoader(
         records,
