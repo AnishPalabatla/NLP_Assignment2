@@ -295,55 +295,49 @@ def get_packed_sft_dataset(
     seq_length: int,
     shuffle: bool,
 ) -> Dataset:
-    import json
-    import random
+    class PackedSFTDataset(Dataset):
+        def __init__(self, examples):
+            self.examples = examples
+
+        def __len__(self):
+            return len(self.examples)
+
+        def __getitem__(self, index):
+            return self.examples[index]
 
     if seq_length <= 0:
         raise ValueError("seq_length must be positive")
 
     with open(dataset_path, "r", encoding="utf-8") as f:
-        examples = [json.loads(line) for line in f if line.strip()]
+        records = [json.loads(line) for line in f if line.strip()]
 
     if shuffle:
-        random.shuffle(examples)
+        random.shuffle(records)
 
-    # Tokenize all documents and concatenate them into one token stream.
-    all_token_ids = []
+    # Concatenate raw text before tokenization.
+    text = "".join(
+        record["prompt"] + record["response"]
+        for record in records
+    )
 
-    for example in examples:
-        text = example["prompt"] + example["response"]
-        token_ids = tokenizer(text)["input_ids"]
-        all_token_ids.extend(token_ids)
+    token_ids = tokenizer(
+        text,
+        add_special_tokens=True,
+        truncation=False,
+    )["input_ids"]
 
-    # Each input chunk has seq_length tokens. Labels are the next-token
-    # targets, shifted by one position in the concatenated token stream.
-    num_sequences = (len(all_token_ids) - 1) // seq_length
+    examples = []
 
-    packed_examples = []
+    # Each input has seq_length tokens; labels are shifted by one.
+    for start in range(0, len(token_ids) - seq_length, seq_length):
+        block = token_ids[start : start + seq_length + 1]
 
-    for i in range(num_sequences):
-        start = i * seq_length
-        input_ids = all_token_ids[start : start + seq_length]
-        labels = all_token_ids[start + 1 : start + seq_length + 1]
+        examples.append({
+            "input_ids": torch.tensor(block[:-1], dtype=torch.long),
+            "labels": torch.tensor(block[1:], dtype=torch.long),
+        })
 
-        packed_examples.append(
-            {
-                "input_ids": torch.tensor(input_ids, dtype=torch.long),
-                "labels": torch.tensor(labels, dtype=torch.long),
-            }
-        )
-
-    class PackedSFTDataset(Dataset):
-        def __init__(self, items):
-            self.items = items
-
-        def __len__(self):
-            return len(self.items)
-
-        def __getitem__(self, index):
-            return self.items[index]
-
-    return PackedSFTDataset(packed_examples)
+    return PackedSFTDataset(examples)
 
 
 def run_iterate_batches(
