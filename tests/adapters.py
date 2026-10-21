@@ -298,8 +298,6 @@ def get_packed_sft_dataset(
     import json
     import random
 
-    from torch.utils.data import Dataset
-
     if seq_length <= 0:
         raise ValueError("seq_length must be positive")
 
@@ -309,58 +307,43 @@ def get_packed_sft_dataset(
     if shuffle:
         random.shuffle(examples)
 
-    all_input_ids = []
-    all_labels = []
+    # Tokenize all documents and concatenate them into one token stream.
+    all_token_ids = []
 
     for example in examples:
-        if "prompt" not in example or "response" not in example:
-            raise ValueError(
-                "Each SFT example must contain 'prompt' and 'response'"
-            )
-
         text = example["prompt"] + example["response"]
-        token_ids = tokenizer(
-            text,
-            add_special_tokens=True,
-            truncation=True,
-            max_length=seq_length + 1,
-        )["input_ids"]
+        token_ids = tokenizer(text)["input_ids"]
+        all_token_ids.extend(token_ids)
 
-        # Need one extra token to construct shifted labels.
-        if len(token_ids) < seq_length + 1:
-            pad_id = tokenizer.pad_token_id
-            if pad_id is None:
-                pad_id = tokenizer.eos_token_id
-            if pad_id is None:
-                raise ValueError(
-                    "Tokenizer must define a pad_token_id or eos_token_id"
-                )
-            token_ids = token_ids + [pad_id] * (
-                seq_length + 1 - len(token_ids)
-            )
+    # Each input chunk has seq_length tokens. Labels are the next-token
+    # targets, shifted by one position in the concatenated token stream.
+    num_sequences = (len(all_token_ids) - 1) // seq_length
 
-        all_input_ids.append(
-            torch.tensor(token_ids[:-1], dtype=torch.long)
-        )
-        all_labels.append(
-            torch.tensor(token_ids[1:], dtype=torch.long)
+    packed_examples = []
+
+    for i in range(num_sequences):
+        start = i * seq_length
+        input_ids = all_token_ids[start : start + seq_length]
+        labels = all_token_ids[start + 1 : start + seq_length + 1]
+
+        packed_examples.append(
+            {
+                "input_ids": torch.tensor(input_ids, dtype=torch.long),
+                "labels": torch.tensor(labels, dtype=torch.long),
+            }
         )
 
     class PackedSFTDataset(Dataset):
-        def __init__(self, input_ids, labels):
-            self.input_ids = input_ids
-            self.labels = labels
+        def __init__(self, items):
+            self.items = items
 
         def __len__(self):
-            return len(self.input_ids)
+            return len(self.items)
 
         def __getitem__(self, index):
-            return {
-                "input_ids": self.input_ids[index],
-                "labels": self.labels[index],
-            }
+            return self.items[index]
 
-    return PackedSFTDataset(all_input_ids, all_labels)
+    return PackedSFTDataset(packed_examples)
 
 
 def run_iterate_batches(
@@ -373,7 +356,7 @@ def run_iterate_batches(
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
-    return DataLoader(
+    return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
@@ -456,64 +439,69 @@ def run_compute_per_instance_dpo_loss(
     if beta <= 0:
         raise ValueError("beta must be positive")
 
-    device = next(lm.parameters()).device
-    ref_device = next(lm_ref.parameters()).device
-
-    def response_log_prob_sum(
+    def get_response_log_prob(
         model: torch.nn.Module,
+        prompt: str,
         response: str,
-        model_device: torch.device,
     ) -> torch.Tensor:
-        # Tokenize prompt and full sequence separately so that we can
-        # identify which next-token predictions belong to the response.
+        device = next(model.parameters()).device
+
+        # Tokenize the prompt and the complete sequence without adding
+        # special tokens, so both use the same tokenization convention.
         prompt_ids = tokenizer(
-            prompt,
-            return_tensors="pt",
-            add_special_tokens=False,
+            prompt, add_special_tokens=False
         )["input_ids"]
 
         full_ids = tokenizer(
-            prompt + response,
-            return_tensors="pt",
-            add_special_tokens=False,
+            prompt + response, add_special_tokens=False
         )["input_ids"]
 
-        prompt_length = prompt_ids.shape[1]
+        # Find the common token prefix. Tokenization at the prompt/response
+        # boundary can change the final prompt token.
+        common_prefix_len = 0
+        for prompt_token, full_token in zip(prompt_ids, full_ids):
+            if prompt_token != full_token:
+                break
+            common_prefix_len += 1
 
-        if full_ids.shape[1] <= prompt_length:
+        if common_prefix_len == 0:
+            raise ValueError("Could not identify the prompt token prefix")
+
+        if len(full_ids) <= common_prefix_len:
             raise ValueError("Response must contain at least one token")
 
-        input_ids = full_ids[:, :-1].to(model_device)
-        labels = full_ids[:, 1:].to(model_device)
+        input_ids = torch.tensor(
+            [full_ids[:-1]], dtype=torch.long, device=device
+        )
+        labels = torch.tensor(
+            [full_ids[1:]], dtype=torch.long, device=device
+        )
 
         logits = model(input_ids=input_ids).logits
         log_probs = F.log_softmax(logits, dim=-1)
 
         token_log_probs = log_probs.gather(
-            dim=-1,
-            index=labels.unsqueeze(-1),
+            -1, labels.unsqueeze(-1)
         ).squeeze(-1)
 
-        # The first response token is predicted at position prompt_length - 1.
-        response_start = max(prompt_length - 1, 0)
-        response_log_probs = token_log_probs[:, response_start:]
+        # Logit position j predicts token position j + 1.
+        response_start = common_prefix_len - 1
+        return token_log_probs[:, response_start:].sum()
 
-        return response_log_probs.sum(dim=-1).squeeze(0)
-
-    policy_chosen = response_log_prob_sum(lm, response_chosen, device)
-    policy_rejected = response_log_prob_sum(lm, response_rejected, device)
+    policy_chosen = get_response_log_prob(lm, prompt, response_chosen)
+    policy_rejected = get_response_log_prob(lm, prompt, response_rejected)
 
     with torch.no_grad():
-        ref_chosen = response_log_prob_sum(
-            lm_ref, response_chosen, ref_device
+        reference_chosen = get_response_log_prob(
+            lm_ref, prompt, response_chosen
         )
-        ref_rejected = response_log_prob_sum(
-            lm_ref, response_rejected, ref_device
+        reference_rejected = get_response_log_prob(
+            lm_ref, prompt, response_rejected
         )
 
-    # DPO: -log sigmoid(beta * (policy preference - reference preference))
-    policy_log_ratio = policy_chosen - policy_rejected
-    ref_log_ratio = ref_chosen.to(device) - ref_rejected.to(device)
+    policy_preference = policy_chosen - policy_rejected
+    reference_preference = reference_chosen - reference_rejected
 
-    loss = -F.logsigmoid(beta * (policy_log_ratio - ref_log_ratio))
-    return loss
+    return -F.logsigmoid(
+        beta * (policy_preference - reference_preference)
+    )
