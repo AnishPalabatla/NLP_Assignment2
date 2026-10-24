@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import PreTrainedTokenizerBase
 
 
-class _TensorDictDataset(Dataset):
+class _PackedSFTDataset(Dataset):
     def __init__(self, examples: list[dict[str, Tensor]]) -> None:
         self.examples = examples
 
@@ -46,54 +46,17 @@ def run_tokenize_prompt_and_output(
             "response_mask": torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
                 a mask on the response tokens in `labels`.
     """
-    if len(prompt_strs) != len(output_strs):
-        raise ValueError("prompt_strs and output_strs must have the same length")
+    from cs336_alignment.sft_utils import tokenize_prompt_and_output
 
-    prompt_ids = [
-        tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        for prompt in prompt_strs
-    ]
-    output_ids = [
-        tokenizer(output, add_special_tokens=False)["input_ids"]
-        for output in output_strs
-    ]
-    sequences = [prompt + output for prompt, output in zip(prompt_ids, output_ids)]
-    max_length = max((len(sequence) for sequence in sequences), default=0)
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None:
-        pad_token_id = tokenizer.eos_token_id
-    if pad_token_id is None:
-        raise ValueError("tokenizer must define a pad_token_id or eos_token_id")
-
-    input_rows: list[list[int]] = []
-    label_rows: list[list[int]] = []
-    response_masks: list[list[bool]] = []
-    for prompt, output, sequence in zip(prompt_ids, output_ids, sequences):
-        padded = sequence + [pad_token_id] * (max_length - len(sequence))
-        input_rows.append(padded[:-1])
-        label_rows.append(padded[1:])
-        mask = [False] * max(max_length - 1, 0)
-        response_start = max(len(prompt) - 1, 0)
-        response_end = min(len(prompt) + len(output) - 1, len(mask))
-        for index in range(response_start, response_end):
-            mask[index] = True
-        response_masks.append(mask)
-
-    return {
-        "input_ids": torch.tensor(input_rows, dtype=torch.long).reshape(
-            len(prompt_strs), max(max_length - 1, 0)
-        ),
-        "labels": torch.tensor(label_rows, dtype=torch.long).reshape(
-            len(prompt_strs), max(max_length - 1, 0)
-        ),
-        "response_mask": torch.tensor(response_masks, dtype=torch.bool).reshape(
-            len(prompt_strs), max(max_length - 1, 0)
-        ),
-    }
+    return tokenize_prompt_and_output(
+        prompt_strs=prompt_strs,
+        output_strs=output_strs,
+        tokenizer=tokenizer,
+    )
 
 
 def run_compute_group_normalized_rewards(
-    reward_fn: Callable,
+    reward_fn: Callable[[str, str], dict[str, float]],
     rollout_responses: list[str],
     repeated_ground_truths: list[str],
     group_size: int,
@@ -135,43 +98,23 @@ def run_compute_group_normalized_rewards(
                 You may choose what you wish to log here
                 (some statistics of the rewards, etc.).
     """
-    if group_size <= 0 or len(rollout_responses) % group_size:
-        raise ValueError("rollout count must be divisible by a positive group_size")
-    if len(repeated_ground_truths) != len(rollout_responses):
-        raise ValueError("each rollout response must have one ground truth")
+    from cs336_alignment.grpo import compute_group_normalized_rewards
 
-    raw_rewards = torch.tensor(
-        [
-            reward_fn(response, ground_truth)["reward"]
-            for response, ground_truth in zip(rollout_responses, repeated_ground_truths)
-        ],
-        dtype=torch.float32,
+    return compute_group_normalized_rewards(
+        reward_fn=reward_fn,
+        rollout_responses=rollout_responses,
+        repeated_ground_truths=repeated_ground_truths,
+        group_size=group_size,
+        advantage_eps=advantage_eps,
+        normalize_by_std=normalize_by_std,
     )
-    grouped_rewards = raw_rewards.reshape(-1, group_size)
-    group_means = grouped_rewards.mean(dim=1, keepdim=True)
-    centered_rewards = grouped_rewards - group_means
-    if normalize_by_std:
-        if group_size == 1:
-            group_stds = torch.zeros_like(group_means)
-        else:
-            group_stds = grouped_rewards.std(dim=1, keepdim=True, unbiased=True)
-        centered_rewards = centered_rewards / (group_stds + advantage_eps)
-
-    normalized_rewards = centered_rewards.reshape(-1)
-    metadata = {
-        "mean_reward": raw_rewards.mean().item() if raw_rewards.numel() else 0.0,
-        "std_reward": raw_rewards.std(unbiased=False).item()
-        if raw_rewards.numel()
-        else 0.0,
-    }
-    return normalized_rewards, raw_rewards, metadata
 
 
 def run_compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     """Get the entropy of the logits (i.e., entropy of the final dimension)."""
-    log_probs = torch.log_softmax(logits, dim=-1)
-    probabilities = log_probs.exp()
-    return -(probabilities * log_probs).sum(dim=-1)
+    from cs336_alignment.sft_utils import compute_entropy
+
+    return compute_entropy(logits)
 
 
 def run_get_response_log_probs(
@@ -203,13 +146,14 @@ def run_get_response_log_probs(
                 we have not masked out the token indices corresponding to the prompt
                 or padding; that is done in the train loop.
     """
-    logits = model(input_ids).logits
-    log_probs = torch.log_softmax(logits, dim=-1)
-    token_log_probs = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
-    result = {"log_probs": token_log_probs}
-    if return_token_entropy:
-        result["token_entropy"] = run_compute_entropy(logits)
-    return result
+    from cs336_alignment.sft_utils import get_response_log_probs
+
+    return get_response_log_probs(
+        model=model,
+        input_ids=input_ids,
+        labels=labels,
+        return_token_entropy=return_token_entropy,
+    )
 
 
 def run_compute_naive_policy_gradient_loss(
@@ -228,7 +172,12 @@ def run_compute_naive_policy_gradient_loss(
         torch.Tensor of shape (batch_size, sequence_length): 
             the policy gradient per-token loss.
     """
-    return -raw_rewards_or_advantages * policy_log_probs
+    from cs336_alignment.grpo import compute_naive_policy_gradient_loss
+
+    return compute_naive_policy_gradient_loss(
+        raw_rewards_or_advantages=raw_rewards_or_advantages,
+        policy_log_probs=policy_log_probs,
+    )
 
 
 def run_compute_grpo_clip_loss(
@@ -255,14 +204,14 @@ def run_compute_grpo_clip_loss(
             dict[str, torch.Tensor]: metadata for the GRPO-Clip loss 
                 (used to compute clip fraction).
     """
-    log_ratio = policy_log_probs - old_log_probs
-    ratio = log_ratio.exp()
-    clipped_ratio = ratio.clamp(1.0 - cliprange, 1.0 + cliprange)
-    unclipped_objective = ratio * advantages
-    clipped_objective = clipped_ratio * advantages
-    per_token_loss = -torch.minimum(unclipped_objective, clipped_objective)
-    metadata = {"clip_mask": ratio.ne(clipped_ratio)}
-    return per_token_loss, metadata
+    from cs336_alignment.grpo import compute_grpo_clip_loss
+
+    return compute_grpo_clip_loss(
+        advantages=advantages,
+        policy_log_probs=policy_log_probs,
+        old_log_probs=old_log_probs,
+        cliprange=cliprange,
+    )
 
 
 def run_compute_policy_gradient_loss(
@@ -276,39 +225,22 @@ def run_compute_policy_gradient_loss(
     """
     Wrapper that delegates to the appropriate policy gradient loss function above.
     """
-    if loss_type == "no_baseline":
-        if raw_rewards is None:
-            raise ValueError("raw_rewards is required for loss_type='no_baseline'")
-        return run_compute_naive_policy_gradient_loss(
-            raw_rewards_or_advantages=raw_rewards,
-            policy_log_probs=policy_log_probs,
-        ), {}
-    if loss_type == "reinforce_with_baseline":
-        if advantages is None:
-            raise ValueError(
-                "advantages are required for loss_type='reinforce_with_baseline'"
-            )
-        return run_compute_naive_policy_gradient_loss(
-            raw_rewards_or_advantages=advantages,
-            policy_log_probs=policy_log_probs,
-        ), {}
-    if loss_type == "grpo_clip":
-        if advantages is None or old_log_probs is None or cliprange is None:
-            raise ValueError(
-                "advantages, old_log_probs, and cliprange are required for "
-                "loss_type='grpo_clip'"
-            )
-        return run_compute_grpo_clip_loss(
-            advantages=advantages,
-            policy_log_probs=policy_log_probs,
-            old_log_probs=old_log_probs,
-            cliprange=cliprange,
-        )
-    raise ValueError(f"unsupported loss_type: {loss_type}")
+    from cs336_alignment.grpo import compute_policy_gradient_loss
+
+    return compute_policy_gradient_loss(
+        policy_log_probs=policy_log_probs,
+        loss_type=loss_type,
+        raw_rewards=raw_rewards,
+        advantages=advantages,
+        old_log_probs=old_log_probs,
+        cliprange=cliprange,
+    )
 
 
 def run_masked_mean(
-    tensor: torch.Tensor, mask: torch.Tensor, dim: int | None = None
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    dim: int | None = None,
 ) -> torch.Tensor:
     """Compute the mean of the tensor along a dimension,
     considering only the elements with mask value 1.
@@ -325,11 +257,10 @@ def run_masked_mean(
         torch.Tensor, the mean of the tensor along the specified
             dimension, considering only the elements with mask value 1.
     """
-    mask = mask.to(device=tensor.device, dtype=tensor.dtype)
-    masked_tensor = torch.where(mask.bool(), tensor, torch.zeros_like(tensor))
-    numerator = masked_tensor.sum(dim=dim)
-    denominator = mask.sum(dim=dim)
-    return numerator / denominator
+    from cs336_alignment.grpo import masked_mean
+
+    return masked_mean(tensor=tensor, mask=mask, dim=dim)
+
 
 def run_sft_microbatch_train_step(
     policy_log_probs: torch.Tensor,
@@ -339,19 +270,16 @@ def run_sft_microbatch_train_step(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the policy gradient loss and backprop its gradients for a microbatch.
     """
-    if gradient_accumulation_steps <= 0:
-        raise ValueError("gradient_accumulation_steps must be positive")
-    loss = run_masked_normalize(
-        tensor=-policy_log_probs,
-        mask=response_mask,
-        dim=-1,
-        normalize_constant=float(normalize_constant),
-    ).mean()
-    loss = loss / gradient_accumulation_steps
-    loss.backward()
-    return loss, {}
+    from cs336_alignment.sft_utils import sft_microbatch_train_step
 
-    
+    return sft_microbatch_train_step(
+        policy_log_probs=policy_log_probs,
+        response_mask=response_mask,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        normalize_constant=normalize_constant,
+    )
+
+
 def run_grpo_microbatch_train_step(
     policy_log_probs: torch.Tensor,
     response_mask: torch.Tensor,
@@ -388,22 +316,18 @@ def run_grpo_microbatch_train_step(
         tuple[torch.Tensor, dict[str, torch.Tensor]]: 
             the policy gradient loss and its metadata.
     """
-    if gradient_accumulation_steps <= 0:
-        raise ValueError("gradient_accumulation_steps must be positive")
-    per_token_loss, metadata = run_compute_policy_gradient_loss(
+    from cs336_alignment.grpo import grpo_microbatch_train_step
+
+    return grpo_microbatch_train_step(
         policy_log_probs=policy_log_probs,
+        response_mask=response_mask,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         loss_type=loss_type,
         raw_rewards=raw_rewards,
         advantages=advantages,
         old_log_probs=old_log_probs,
         cliprange=cliprange,
     )
-    loss = run_masked_mean(
-        tensor=per_token_loss, mask=response_mask, dim=-1
-    ).mean()
-    loss = loss / gradient_accumulation_steps
-    loss.backward()
-    return loss, metadata
 
 
 def run_masked_normalize(
@@ -428,11 +352,14 @@ def run_masked_normalize(
         torch.Tensor, the normalized sum, where masked elements
             (mask=0) don't contribute to the sum.
     """
-    if normalize_constant == 0:
-        raise ValueError("normalize_constant must be non-zero")
-    mask = mask.to(device=tensor.device, dtype=torch.bool)
-    masked_tensor = torch.where(mask, tensor, torch.zeros_like(tensor))
-    return masked_tensor.sum(dim=dim) / normalize_constant
+    from cs336_alignment.sft_utils import masked_normalize
+
+    return masked_normalize(
+        tensor=tensor,
+        mask=mask,
+        normalize_constant=normalize_constant,
+        dim=dim,
+    )
 
 
 """
@@ -470,6 +397,9 @@ def get_packed_sft_dataset(
     """
     if seq_length <= 0:
         raise ValueError("seq_length must be positive")
+    if tokenizer.eos_token_id is None:
+        raise ValueError("tokenizer must define an eos_token_id")
+
     with open(dataset_path, encoding="utf-8") as dataset_file:
         documents = [json.loads(line) for line in dataset_file if line.strip()]
     if shuffle:
@@ -481,23 +411,21 @@ def get_packed_sft_dataset(
         / "prompts"
         / "alpaca_sft.prompt"
     )
-    with open(prompt_template_path, encoding="utf-8") as template_file:
+    with prompt_template_path.open(encoding="utf-8") as template_file:
         prompt_template = template_file.read()
 
-    if tokenizer.eos_token_id is None:
-        raise ValueError("tokenizer must define an eos_token_id for document packing")
-    all_token_ids: list[int] = []
+    token_stream: list[int] = []
     for document in documents:
         text = prompt_template.format(
-            instruction=document["prompt"], response=document["response"]
+            instruction=document["prompt"],
+            response=document["response"],
         ).strip()
-        token_ids = tokenizer(text, add_special_tokens=True)["input_ids"]
-        all_token_ids.extend(token_ids)
-        all_token_ids.append(tokenizer.eos_token_id)
+        token_stream.extend(tokenizer(text, add_special_tokens=True)["input_ids"])
+        token_stream.append(tokenizer.eos_token_id)
 
     examples: list[dict[str, Tensor]] = []
-    for start in range(0, max(len(all_token_ids) - 1, 0), seq_length):
-        token_window = all_token_ids[start : start + seq_length + 1]
+    for start in range(0, len(token_stream) - seq_length, seq_length):
+        token_window = token_stream[start : start + seq_length + 1]
         if len(token_window) != seq_length + 1:
             break
         examples.append(
@@ -506,7 +434,7 @@ def get_packed_sft_dataset(
                 "labels": torch.tensor(token_window[1:], dtype=torch.long),
             }
         )
-    return _TensorDictDataset(examples)
+    return _PackedSFTDataset(examples)
 
 
 def run_iterate_batches(
@@ -557,27 +485,28 @@ def run_parse_mmlu_response(
         str (one of "A", "B", "C", or "D") if the model output can be parsed into a prediction,
         else None.
     """
-    options = mmlu_example.get("options", [])
-    if not options or len(options) > 4:
+    options = mmlu_example.get("options")
+    if not isinstance(options, list) or not options or len(options) > 4:
         return None
-    valid_choices = "ABCD"[: len(options)]
-    choice_pattern = f"[{valid_choices}]"
-    output = model_output.strip()
+
+    choices = "ABCD"[: len(options)]
+    choice = rf"[{choices}]"
     explicit_patterns = (
-        rf"(?:the\s+)?(?:correct\s+)?answer\s*(?:is|:)\s*\(?({choice_pattern})\)?\b",
-        rf"\boption\s*\(?({choice_pattern})\)?\b",
-        rf"\\boxed\s*\{{\s*({choice_pattern})\s*\}}",
+        rf"\banswer\s*(?:is|:)\s*\(?({choice})\)?\b",
+        rf"\boption\s*\(?({choice})\)?\b",
+        rf"\\boxed\s*\{{\s*({choice})\s*\}}",
     )
     for pattern in explicit_patterns:
-        matches = re.findall(pattern, output, flags=re.IGNORECASE)
+        matches = re.findall(pattern, model_output, flags=re.IGNORECASE)
         if matches:
             return matches[-1].upper()
-    choices = re.findall(
-        rf"(?<![A-Za-z0-9])({choice_pattern})(?![A-Za-z0-9])",
-        output,
+
+    matches = re.findall(
+        rf"(?<![A-Za-z0-9])({choice})(?![A-Za-z0-9])",
+        model_output,
         flags=re.IGNORECASE,
     )
-    return choices[-1].upper() if choices else None
+    return matches[-1].upper() if matches else None
 
 
 def run_parse_gsm8k_response(
@@ -594,10 +523,11 @@ def run_parse_gsm8k_response(
         str with the predicted numeric answer if the model output can be parsed into a prediction,
         else None.
     """
-    numbers = re.findall(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?", model_output)
-    if not numbers:
-        return None
-    return numbers[-1].replace(",", "")
+    numbers = re.findall(
+        r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?",
+        model_output,
+    )
+    return numbers[-1].replace(",", "") if numbers else None
 
 
 def run_compute_per_instance_dpo_loss(
@@ -632,24 +562,58 @@ def run_compute_per_instance_dpo_loss(
     Returns:
         torch.Tensor with the DPO loss for this example.
     """
-    def response_log_prob_sum(response: str, model: torch.nn.Module) -> Tensor:
-        encoded = tokenizer(prompt + response, return_tensors="pt")
-        input_ids = encoded["input_ids"].to(next(model.parameters()).device)
+    if beta <= 0:
+        raise ValueError("beta must be positive")
+    if tokenizer.eos_token is None:
+        raise ValueError("tokenizer must define an eos_token")
+
+    def response_log_prob_sum(
+        model: torch.nn.Module, response: str
+    ) -> Tensor:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = torch.device("cpu")
+
+        encoded = tokenizer(
+            prompt + response + tokenizer.eos_token,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        input_ids = encoded["input_ids"].to(device)
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
         response_start = len(prompt_ids) - 1
+        if response_start < 0:
+            response_start = 0
+
+        logits = model(input_ids=input_ids).logits[:, :-1, :]
         labels = input_ids[:, 1:]
-        logits = model(input_ids).logits[:, :-1, :]
         token_log_probs = torch.log_softmax(logits, dim=-1).gather(
-            dim=-1, index=labels.unsqueeze(-1)
+            dim=-1,
+            index=labels.unsqueeze(-1),
         ).squeeze(-1)
         return token_log_probs[:, response_start:].sum()
 
-    policy_chosen = response_log_prob_sum(response_chosen, lm)
-    policy_rejected = response_log_prob_sum(response_rejected, lm)
-    with torch.no_grad():
-        reference_chosen = response_log_prob_sum(response_chosen, lm_ref)
-        reference_rejected = response_log_prob_sum(response_rejected, lm_ref)
+    policy_was_training = lm.training
+    reference_was_training = lm_ref.training
+    lm.eval()
+    lm_ref.eval()
+    try:
+        policy_chosen = response_log_prob_sum(lm, response_chosen)
+        policy_rejected = response_log_prob_sum(lm, response_rejected)
+        with torch.no_grad():
+            reference_chosen = response_log_prob_sum(lm_ref, response_chosen)
+            reference_rejected = response_log_prob_sum(lm_ref, response_rejected)
+    finally:
+        if policy_was_training:
+            lm.train()
+        if reference_was_training:
+            lm_ref.train()
+
     preference_logit = beta * (
-        (policy_chosen - reference_chosen) - (policy_rejected - reference_rejected)
+        policy_chosen
+        - policy_rejected
+        - reference_chosen
+        + reference_rejected
     )
     return -torch.nn.functional.logsigmoid(preference_logit)
