@@ -9,9 +9,8 @@ from typing import Callable, List, Dict, Any, Optional
 import wandb
 from vllm import LLM, SamplingParams
 
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+from alignment.drgrpo_grader import r1_zero_reward_fn
 from wandb_utils import log_wandb_metrics, start_wandb_run
-
 
 @dataclass
 class EvalRow:
