@@ -14,9 +14,9 @@ from unittest.mock import patch
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
-from cs336_alignment.sft_utils import tokenize_prompt_and_output, get_response_log_probs
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn, question_only_reward_fn
-from cs336_alignment.grpo import compute_group_normalized_rewards, grpo_microbatch_train_step, masked_mean
+from tests.adapters import run_tokenize_prompt_and_output as tokenize_prompt_and_output, run_get_response_log_probs as get_response_log_probs
+from alignment.drgrpo_grader import r1_zero_reward_fn
+from tests.adapters import run_compute_group_normalized_rewards as compute_group_normalized_rewards, run_grpo_microbatch_train_step as grpo_microbatch_train_step, run_masked_mean as masked_mean
 from wandb_utils import log_wandb_metrics, start_wandb_run
 
 
@@ -30,7 +30,7 @@ class LossType(str, Enum):
     grpo_no_clip = "grpo_no_clip"
 
 
-def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
+def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.25):
     vllm_set_random_seed(seed)
     world_size_path = patch("torch.distributed.get_world_size", return_value=1)
     profiling_patch = patch(
@@ -44,6 +44,7 @@ def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: flo
             dtype=torch.bfloat16,
             enable_prefix_caching=True,
             gpu_memory_utilization=gpu_memory_utilization,
+            enforce_eager=True,
         )
 
 
@@ -111,7 +112,6 @@ def eval_rewards_with_vllm(
         temperature=temperature,
         min_tokens=min_tokens,
         max_tokens=max_tokens,
-        stop=stop,
     )
     outs = llm.generate(prompts, sp)
     # outs[i].outputs[0].text
@@ -135,7 +135,7 @@ def main(
     model_id: str = "data/models/Qwen2.5-Math-1.5B",
     train_path: str = "data/MATH/train.jsonl",
     val_path: str = "data/MATH/validation.jsonl",
-    prompt_file: str = "cs336_alignment/prompts/r1_zero.prompt",
+    prompt_file: str = "alignment/prompts/r1_zero.prompt",
     seed: int = 0,
 
     # ===== GRPO hypers =====
@@ -150,7 +150,7 @@ def main(
     epochs_per_rollout_batch: int = 1,
     train_batch_size: int = 256,
     gradient_accumulation_steps: int = 128,
-    gpu_memory_utilization: float = 0.85,
+    gpu_memory_utilization: float = 0.25,
     loss_type: LossType = LossType.reinforce_with_baseline,
     use_std_normalization: bool = True,
     cliprange: float = 0.2,
@@ -225,7 +225,7 @@ def main(
 
     optimizer = torch.optim.AdamW(policy.parameters(), lr=learning_rate, weight_decay=0.0, betas=(0.9, 0.95))
 
-    llm = init_vllm(model_id=model_id, device="cuda:1", seed=seed, gpu_memory_utilization=gpu_memory_utilization)
+    llm = init_vllm(model_id=model_id, device="cuda:0", seed=seed, gpu_memory_utilization=gpu_memory_utilization)
 
     load_policy_into_vllm_instance(policy, llm)
 
@@ -248,6 +248,7 @@ def main(
             max_tokens=sampling_max_tokens,
             n=group_size,
             stop=[stop_at],
+            include_stop_str_in_output=True,
         )
         outs = llm.generate(batch_prompts, sp)
 
