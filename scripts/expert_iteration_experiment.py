@@ -37,6 +37,7 @@ def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: flo
             dtype=torch.bfloat16,
             enable_prefix_caching=True,
             gpu_memory_utilization=gpu_memory_utilization,
+            enforce_eager=True,
         )
     
 
