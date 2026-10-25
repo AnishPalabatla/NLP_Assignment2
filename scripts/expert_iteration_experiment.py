@@ -19,6 +19,7 @@ from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from cs336_alignment.sft_utils import tokenize_prompt_and_output, get_response_log_probs, sft_microbatch_train_step
 
 from math_baseline import evaluate_vllm
+from wandb_utils import log_wandb_metrics, start_wandb_run
 
 
 def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85) -> LLM:
@@ -425,12 +426,46 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "log.jsonl"
     log_event = make_logger(log_path)
+    wandb_run = start_wandb_run(
+        stage="expert_iteration",
+        config=vars(args),
+        run_dir=run_dir,
+    )
+
+    def log_event_with_wandb(event: Dict[str, Any], also_print: bool = True):
+        log_event(event, also_print=also_print)
+        event_type = event.get("type")
+        if event_type == "eval_metrics":
+            log_wandb_metrics(
+                wandb_run,
+                {
+                    **event["metrics"],
+                    "ei/step": event["ei_step"],
+                },
+            )
+        elif event_type == "rollout_stats":
+            stats = event["stats"]
+            log_wandb_metrics(
+                wandb_run,
+                {f"rollout/{key}": value for key, value in stats.items()},
+            )
+        elif event_type == "train_step":
+            log_wandb_metrics(
+                wandb_run,
+                {
+                    "train/loss": event["loss"],
+                    "train/avg_token_entropy": event["train/avg_token_entropy"],
+                    "ei/step": event["ei_step"],
+                    "train/micro_step": event["micro_step"],
+                    "train/optimizer_step": event["opt_step"],
+                },
+            )
 
     # seeds
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
-    log_event(
+    log_event_with_wandb(
         {
             "type": "config",
             "args": vars(args),
@@ -493,7 +528,7 @@ def main():
         eval_sampling_params=eval_sampling_params,
         request_batch_size=args.eval_request_batch_size,
     )
-    log_event({"type": "eval_metrics", "ei_step": 0, "metrics": init_metrics, "msg": f"[EI 0] {init_metrics}"})
+    log_event_with_wandb({"type": "eval_metrics", "ei_step": 0, "metrics": init_metrics, "msg": f"[EI 0] {init_metrics}"})
 
     # EI loop
     rng = random.Random(args.seed)
@@ -527,7 +562,7 @@ def main():
         ei_data_path = run_dir / f"ei_step_{ei_step:02d}_kept.jsonl"
         save_jsonl(kept_items, ei_data_path)
 
-        log_event(
+        log_event_with_wandb(
             {
                 "type": "rollout_stats",
                 "ei_step": ei_step,
@@ -549,11 +584,11 @@ def main():
             grad_acc_steps=args.grad_acc_steps,
             epochs=args.epochs,
             max_train_steps=args.max_train_steps_per_ei,
-            log_event=log_event,
+            log_event=log_event_with_wandb,
             ei_step=ei_step,
             train_log_interval_opt_steps=10,            
         )
-        log_event({"type": "train_summary", "ei_step": ei_step, "summary": train_summary,
+        log_event_with_wandb({"type": "train_summary", "ei_step": ei_step, "summary": train_summary,
                    "msg": f"[EI {ei_step}] train summary: {train_summary}"})
         
         # eval after EI step
@@ -565,7 +600,7 @@ def main():
             eval_sampling_params=eval_sampling_params,
             request_batch_size=args.eval_request_batch_size,
         )
-        log_event({"type": "eval_metrics", "ei_step": ei_step, "metrics": metrics,
+        log_event_with_wandb({"type": "eval_metrics", "ei_step": ei_step, "metrics": metrics,
                    "msg": f"[EI {ei_step}] {metrics}"})
 
         # save model
@@ -574,7 +609,7 @@ def main():
             step_dir.mkdir(parents=True, exist_ok=True)
             policy.save_pretrained(str(step_dir))
             tokenizer.save_pretrained(str(step_dir))
-            log_event({"type": "save", "ei_step": ei_step, "out_dir": str(step_dir),
+            log_event_with_wandb({"type": "save", "ei_step": ei_step, "out_dir": str(step_dir),
                        "msg": f"[EI {ei_step}] Saved model: {step_dir}"})
             
         # return to train mode for next step
@@ -585,8 +620,9 @@ def main():
     final_dir.mkdir(parents=True, exist_ok=True)
     policy.save_pretrained(str(final_dir))
     tokenizer.save_pretrained(str(final_dir))
-    log_event({"type": "save", "ei_step": args.n_ei_steps, "out_dir": str(final_dir),
+    log_event_with_wandb({"type": "save", "ei_step": args.n_ei_steps, "out_dir": str(final_dir),
                "msg": f"Saved final model: {final_dir}"})    
+    wandb_run.finish()
 
 
 if __name__ == "__main__":

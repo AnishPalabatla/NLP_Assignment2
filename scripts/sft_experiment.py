@@ -20,6 +20,7 @@ from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from unittest.mock import patch
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
+from wandb_utils import log_wandb_metrics, start_wandb_run
 
 
 def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
@@ -150,6 +151,11 @@ def main():
     run_dir = Path(args.out_dir) / f"samples{args.train_samples or 'full'}_{'filtered' if args.filter_correct else 'all'}"
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "log.jsonl"
+    wandb_run = start_wandb_run(
+        stage="sft_filtered" if args.filter_correct else "sft_unfiltered",
+        config=vars(args),
+        run_dir=run_dir,
+    )
 
     opt_step = 0  # counts optimizer updates
     step = 0
@@ -170,6 +176,28 @@ def main():
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
             f.flush()
+
+        if event.get("type") == "train_loss":
+            log_wandb_metrics(
+                wandb_run,
+                {
+                    "train/loss": event["loss"],
+                    "train/micro_step": step,
+                    "train/optimizer_step": opt_step,
+                }
+            )
+        elif event.get("type") == "eval_metrics":
+            log_wandb_metrics(
+                wandb_run,
+                {
+                    **event["metrics"],
+                    "train/loss": event["loss"],
+                    "eval/micro_step": step,
+                    "eval/optimizer_step": opt_step,
+                }
+            )
+        elif event.get("type") == "filter_stats":
+            log_wandb_metrics(wandb_run, event["stats"])
 
         if also_print:
             # keep terminal readable
@@ -311,6 +339,7 @@ def main():
     policy.save_pretrained(str(run_dir))
     tokenizer.save_pretrained(str(run_dir))
     log_event({"type": "save", "out_dir": str(run_dir), "msg": f"Saved: {run_dir}"})
+    wandb_run.finish()
 
 
 if __name__ == "__main__":

@@ -6,9 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Dict, Any, Optional
 
+import wandb
 from vllm import LLM, SamplingParams
 
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+from wandb_utils import log_wandb_metrics, start_wandb_run
 
 
 @dataclass
@@ -180,6 +182,15 @@ def main():
         prompts.append(format_r1_zero_prompt(prompt_template, q))
         gts.append(gt)
 
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(args.out_dir) / ts
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = start_wandb_run(
+        stage="math_baseline",
+        config=vars(args),
+        run_dir=out_dir,
+    )
+
     sampling_params = SamplingParams(
         temperature=args.temperature,
         top_p=args.top_p,
@@ -202,15 +213,46 @@ def main():
         request_batch_size=args.batch_size,
     )
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.out_dir) / ts
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     # full per-example
     write_jsonl(str(out_dir / "predications.jsonl"), rows)
 
     # summary json
     summary = summarize(rows)
+    baseline_metrics = {
+        "examples": summary["n"],
+        "format_rate": summary["format_rate"],
+        "answer_accuracy": summary["answer_accuracy"],
+        "avg_reward": summary["avg_reward"],
+        **{
+            f"count/{category}": count
+            for category, count in summary["counts"].items()
+        },
+    }
+    log_wandb_metrics(wandb_run, baseline_metrics)
+
+    samples_table = wandb.Table(
+        columns=[
+            "category",
+            "prompt",
+            "ground_truth",
+            "response",
+            "reward",
+            "format_reward",
+            "answer_reward",
+        ]
+    )
+    for category in ("F1A1", "F1A0", "F0A0"):
+        for row in sample_examples(rows, category, 10):
+            samples_table.add_data(
+                row.category,
+                row.prompt,
+                str(row.ground_truth),
+                row.response,
+                row.reward,
+                row.format_reward,
+                row.answer_reward,
+            )
+    wandb_run.log({"predictions": samples_table})
     with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
@@ -225,6 +267,7 @@ def main():
     
     print("Saved to:", out_dir)
     print(json.dumps(summary, indent=2))
+    wandb_run.finish()
 
 
 if __name__ == "__main__":
