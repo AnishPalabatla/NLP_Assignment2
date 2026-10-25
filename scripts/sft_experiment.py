@@ -13,16 +13,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from math_baseline import evaluate_vllm
 
-from cs336_alignment.sft_utils import tokenize_prompt_and_output, get_response_log_probs, sft_microbatch_train_step, log_generations
+from tests.adapters import run_tokenize_prompt_and_output as tokenize_prompt_and_output, run_get_response_log_probs as get_response_log_probs, run_sft_microbatch_train_step as sft_microbatch_train_step
 
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+from alignment.drgrpo_grader import r1_zero_reward_fn
 
 from unittest.mock import patch
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
 
-def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
+def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.25):
     vllm_set_random_seed(seed)
     world_size_path = patch("torch.distributed.get_world_size", return_value=1)
     profiling_patch = patch(

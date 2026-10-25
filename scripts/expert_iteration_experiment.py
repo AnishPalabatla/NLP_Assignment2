@@ -15,13 +15,13 @@ from unittest.mock import patch
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
-from cs336_alignment.sft_utils import tokenize_prompt_and_output, get_response_log_probs, sft_microbatch_train_step
+from alignment.drgrpo_grader import r1_zero_reward_fn
+from tests.adapters import run_tokenize_prompt_and_output as tokenize_prompt_and_output, run_get_response_log_probs as get_response_log_probs, run_sft_microbatch_train_step as sft_microbatch_train_step
 
 from math_baseline import evaluate_vllm
 
 
-def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85) -> LLM:
+def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.25) -> LLM:
     vllm_set_random_seed(seed)
     world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
     profiling_patch = patch(
@@ -79,7 +79,7 @@ def build_prompts_and_gts(
     uids: List[str] = []
     for ex in data:
         q = ex.get("problem")
-        gt = ex.get("answer")
+        gt = ex.get("answer") or ex.get("ground_truth")
         uid = ex.get("unique_id", "")
         if q is None or gt is None:
             raise KeyError(f"Missing required fields in example: keys={list(ex.keys())}")
