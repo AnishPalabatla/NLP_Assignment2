@@ -5,7 +5,7 @@ import math
 import torch
 from transformers import AutoTokenizer
 
-from .adapters import get_packed_sft_dataset, run_iterate_batches
+#from .adapters import get_packed_sft_dataset, run_iterate_batches
 from .common import FIXTURES_PATH
 
 logger = logging.getLogger(__name__)

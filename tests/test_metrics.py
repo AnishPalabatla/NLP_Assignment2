@@ -1,6 +1,6 @@
 import logging
 
-from .adapters import run_parse_gsm8k_response, run_parse_mmlu_response
+#from .adapters import run_parse_gsm8k_response, run_parse_mmlu_response
 
 logger = logging.getLogger(__name__)
 
