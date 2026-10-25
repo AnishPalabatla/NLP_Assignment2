@@ -17,6 +17,7 @@ from vllm.model_executor import set_random_seed as vllm_set_random_seed
 from cs336_alignment.sft_utils import tokenize_prompt_and_output, get_response_log_probs
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn, question_only_reward_fn
 from cs336_alignment.grpo import compute_group_normalized_rewards, grpo_microbatch_train_step, masked_mean
+from wandb_utils import log_wandb_metrics, start_wandb_run
 
 
 app = typer.Typer()
@@ -182,6 +183,34 @@ def main(
 
     os.makedirs(log_dir, exist_ok=True)
     log_path = Path(log_dir) / "train_log.jsonl"
+    wandb_run = start_wandb_run(
+        stage="grpo",
+        config={
+            "model_id": model_id,
+            "train_path": train_path,
+            "val_path": val_path,
+            "prompt_file": prompt_file,
+            "seed": seed,
+            "n_grpo_steps": n_grpo_steps,
+            "learning_rate": learning_rate,
+            "advantage_eps": advantage_eps,
+            "rollout_batch_size": rollout_batch_size,
+            "group_size": group_size,
+            "sampling_temperature": sampling_temperature,
+            "sampling_min_tokens": sampling_min_tokens,
+            "sampling_max_tokens": sampling_max_tokens,
+            "epochs_per_rollout_batch": epochs_per_rollout_batch,
+            "train_batch_size": train_batch_size,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "loss_type": loss_type.value,
+            "use_std_normalization": use_std_normalization,
+            "cliprange": cliprange,
+            "eval_interval": eval_interval,
+            "eval_max_examples": eval_max_examples,
+            "save_interval": save_interval,
+        },
+        run_dir=log_dir,
+    )
 
     # -------- load data --------
     train_examples = load_math_jsonl(train_path, limit=0, seed=seed)
@@ -365,6 +394,14 @@ def main(
 
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(log_obj) + "\n")                
+                log_wandb_metrics(
+                    wandb_run,
+                    {
+                        f"train/{key}": value
+                        for key, value in log_obj.items()
+                        if isinstance(value, (int, float))
+                    },
+                )
 
                 # ===== periodic eval =====
                 if global_step % eval_interval == 0:
@@ -383,6 +420,10 @@ def main(
                     )
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps({"global_step": global_step, **val_metrics}) + "\n")
+                    log_wandb_metrics(
+                        wandb_run,
+                        {**val_metrics, "global_step": global_step},
+                    )
 
                 # ===== periodic save =====
                 if global_step % save_interval == 0:
@@ -393,6 +434,8 @@ def main(
 
         # before next rollout: synchronize latest policy weights into vLLM
         load_policy_into_vllm_instance(policy, llm)
+
+    wandb_run.finish()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,9 @@ SFT_DATA="${SFT_DATA:-data/sft.jsonl}"
 PROMPT_FILE="${PROMPT_FILE:-cs336_alignment/prompts/r1_zero.prompt}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RUN_ROOT="${RUN_ROOT:-runs/assignment_${RUN_ID}}"
+export RUN_ID
+export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-$RUN_ID}"
+export WANDB_PROJECT="${WANDB_PROJECT:-NLP_Assignment2}"
 TRAIN_DEVICE="${TRAIN_DEVICE:-cuda:0}"
 VLLM_DEVICE="${VLLM_DEVICE:-cuda:1}"
 
