@@ -142,6 +142,52 @@ def sample_examples(rows: List[EvalRow], category: str, k: int = 10) -> List[Eva
     return picked[:k]
 
 
+def log_generations(
+    rows: List[EvalRow],
+    *,
+    run_dir: str | Path,
+    wandb_run,
+    step: int,
+    num_log: int = 8,
+) -> Dict[str, Any]:
+    if num_log < 0:
+        raise ValueError("num_log must be non-negative")
+
+    samples = rows[:num_log]
+    output_path = Path(run_dir) / f"generations_step_{step:06d}.jsonl"
+    write_jsonl(str(output_path), samples)
+
+    table = wandb.Table(
+        columns=[
+            "step",
+            "category",
+            "prompt",
+            "ground_truth",
+            "response",
+            "reward",
+            "format_reward",
+            "answer_reward",
+        ]
+    )
+    for row in samples:
+        table.add_data(
+            step,
+            row.category,
+            row.prompt,
+            str(row.ground_truth),
+            row.response,
+            row.reward,
+            row.format_reward,
+            row.answer_reward,
+        )
+    wandb_run.log({"generations": table, "generation_step": step})
+
+    counts = {"F1A1": 0, "F1A0": 0, "F0A0": 0}
+    for row in samples:
+        counts[row.category] += 1
+    return {"step": step, "n_logged": len(samples), "category_counts": counts}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="data/models/Qwen2.5-Math-1.5B")

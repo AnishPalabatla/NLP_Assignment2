@@ -11,11 +11,15 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from math_baseline import evaluate_vllm
+from math_baseline import evaluate_vllm, log_generations
 
-from cs336_alignment.sft_utils import tokenize_prompt_and_output, get_response_log_probs, sft_microbatch_train_step, log_generations
+from tests.adapters import (
+    run_get_response_log_probs as get_response_log_probs,
+    run_sft_microbatch_train_step as sft_microbatch_train_step,
+    run_tokenize_prompt_and_output as tokenize_prompt_and_output,
+)
 
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+from alignment.drgrpo_grader import r1_zero_reward_fn
 
 from unittest.mock import patch
 from vllm import LLM, SamplingParams
@@ -300,21 +304,21 @@ def main():
                         request_batch_size=64,
                     )
 
-                # generation log records
-                # gen_log = log_generations(
-                #     model=policy,
-                #     tokenizer=tokenizer,
-                #     prompts=eval_prompts[:8],
-                #     ground_truths=eval_gts[:8],
-                #     reward_fn=r1_zero_reward_fn,
-                #     num_log=8,
-                #     step=step,
-                #     stop_str="</answer>",
-                #     max_new_tokens=512,
-                #     temperature=0.0,
-                # )
-
-                # log_event({"type": "gen_stats", "gen_stats": gen_log["stats"], "msg": f"gen stats: {gen_log['stats']}"})
+                generation_stats = log_generations(
+                    rows,
+                    run_dir=run_dir,
+                    wandb_run=wandb_run,
+                    step=step,
+                    num_log=8,
+                )
+                log_event(
+                    {
+                        "type": "generation_stats",
+                        "stats": generation_stats,
+                        "msg": f"Generation log: {generation_stats}",
+                    },
+                    also_print=False,
+                )
 
                 n = len(rows)
                 eval_acc = sum(r.answer_reward for r in rows) / n if n else 0.0
