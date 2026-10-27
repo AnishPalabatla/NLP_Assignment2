@@ -112,6 +112,8 @@ def eval_rewards_with_vllm(
         temperature=temperature,
         min_tokens=min_tokens,
         max_tokens=max_tokens,
+        stop=stop,
+        include_stop_str_in_output=True,
     )
     outs = llm.generate(prompts, sp)
     # outs[i].outputs[0].text
