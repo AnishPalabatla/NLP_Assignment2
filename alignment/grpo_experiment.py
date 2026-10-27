@@ -17,7 +17,7 @@ from vllm.model_executor import set_random_seed as vllm_set_random_seed
 from tests.adapters import run_tokenize_prompt_and_output as tokenize_prompt_and_output, run_get_response_log_probs as get_response_log_probs
 from alignment.drgrpo_grader import r1_zero_reward_fn
 from tests.adapters import run_compute_group_normalized_rewards as compute_group_normalized_rewards, run_grpo_microbatch_train_step as grpo_microbatch_train_step, run_masked_mean as masked_mean
-from wandb_utils import log_wandb_metrics, start_wandb_run
+from alignment.wandb_utils import log_wandb_metrics, start_wandb_run
 
 
 app = typer.Typer()

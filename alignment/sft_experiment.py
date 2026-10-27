@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from math_baseline import evaluate_vllm, log_generations
+from alignment.math_baseline import evaluate_vllm, log_generations
 
 from tests.adapters import run_tokenize_prompt_and_output as tokenize_prompt_and_output, run_get_response_log_probs as get_response_log_probs, run_sft_microbatch_train_step as sft_microbatch_train_step
 
@@ -20,7 +20,7 @@ from alignment.drgrpo_grader import r1_zero_reward_fn
 from unittest.mock import patch
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
-from wandb_utils import log_wandb_metrics, start_wandb_run
+from alignment.wandb_utils import log_wandb_metrics, start_wandb_run
 
 
 def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.25):

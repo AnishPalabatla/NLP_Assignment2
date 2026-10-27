@@ -18,8 +18,8 @@ from vllm.model_executor import set_random_seed as vllm_set_random_seed
 from alignment.drgrpo_grader import r1_zero_reward_fn
 from tests.adapters import run_tokenize_prompt_and_output as tokenize_prompt_and_output, run_get_response_log_probs as get_response_log_probs, run_sft_microbatch_train_step as sft_microbatch_train_step
 
-from math_baseline import evaluate_vllm
-from wandb_utils import log_wandb_metrics, start_wandb_run
+from alignment.math_baseline import evaluate_vllm
+from alignment.wandb_utils import log_wandb_metrics, start_wandb_run
 
 
 def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.25) -> LLM:

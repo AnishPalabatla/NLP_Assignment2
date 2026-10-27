@@ -10,7 +10,7 @@ import wandb
 from vllm import LLM, SamplingParams
 
 from alignment.drgrpo_grader import r1_zero_reward_fn
-from wandb_utils import log_wandb_metrics, start_wandb_run
+from alignment.wandb_utils import log_wandb_metrics, start_wandb_run
 
 @dataclass
 class EvalRow:
